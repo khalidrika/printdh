@@ -18,9 +18,11 @@ import { importBrowserFontFile, listBrowserFonts } from "@/lib/book/browser-font
 import {
   DEFAULT_NUMBER_BADGE_COLOR,
   NUMBER_BADGE_COLOR_OPTIONS,
+  getNumberBadgeColorOption,
   type NumberBadgeColorKey,
 } from "@/lib/book/number-badge-colors";
 import { ImageStudio } from "./ImageStudio";
+import { UploadedImagePreview } from "./UploadedImagePreview";
 import {
   DEFAULT_IMAGE_FRAME_COLOR,
   DEFAULT_IMAGE_FRAME_STYLE,
@@ -834,6 +836,7 @@ const EVEN_FULL_PAGE_TEXT_SAMPLES = [
 ] as const;
 
 export function GeneratorApp(props: GeneratorAppProps) {
+  const searchParams = useSearchParams();
   const [step, setStep] = useState<WizardStep>(1);
   const [mode, setMode] = useState<ModeValue>("full-fact");
   const [facts, setFacts] = useState(props.initialFacts?.trim() ? props.initialFacts : STACKED_EVEN_FACTS_PLACEHOLDER);
@@ -914,7 +917,6 @@ export function GeneratorApp(props: GeneratorAppProps) {
   const fullFactFontVariantInputRef = useRef<HTMLInputElement | null>(null);
   const fullyDescribedTitleFontSourceInputRef = useRef<HTMLInputElement | null>(null);
   const fullyDescribedTitleFontVariantInputRef = useRef<HTMLInputElement | null>(null);
-  const searchParams = useSearchParams();
   const isUploadedImagesMode = mode === "uploaded-images";
   const isUploadedPdfsMode = mode === "uploaded-pdfs";
   const isUploadedPagesMode = isUploadedImagesMode || isUploadedPdfsMode;
@@ -925,11 +927,8 @@ export function GeneratorApp(props: GeneratorAppProps) {
   const uploadedContentPageCount = isUploadedPdfsMode ? uploadedPdfPageCount : uploadedContentFiles.length;
 
   const navigateToStep = useCallback((nextStep: WizardStep) => {
-    if (typeof window === "undefined") {
-      setStep(nextStep);
-      return;
-    }
     const params = new URLSearchParams(window.location.search);
+    params.set("mode", mode);
     if (nextStep === 1) {
       params.delete("step");
     } else {
@@ -939,7 +938,7 @@ export function GeneratorApp(props: GeneratorAppProps) {
     const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
     window.history.pushState(null, "", nextUrl);
     setStep(nextStep);
-  }, []);
+  }, [mode]);
 
   const handleModeSelect = useCallback((nextMode: ModeValue) => {
     const isSwitchingUploadedMode =
@@ -950,6 +949,9 @@ export function GeneratorApp(props: GeneratorAppProps) {
     if (nextMode !== mode && isSwitchingUploadedMode) {
       setUploadedBackgroundlessContentImageIndexes([]);
     }
+    const params = new URLSearchParams(window.location.search);
+    params.set("mode", nextMode);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}${window.location.hash}`);
     setMode(nextMode);
     if (
       nextMode === "described-pictures" ||
@@ -976,6 +978,8 @@ export function GeneratorApp(props: GeneratorAppProps) {
   );
 
   useEffect(() => {
+    // Restore both values together after hydration, including browser back/forward.
+    setMode(parseLayoutMode(searchParams.get("mode")));
     setStep(parseWizardStep(searchParams.get("step")));
   }, [searchParams]);
 
@@ -2066,7 +2070,7 @@ export function GeneratorApp(props: GeneratorAppProps) {
   const selectedMode = useMemo(() => MODES.find((item) => item.value === mode), [mode]);
   const stepFourTitle = mode === "full-fact" ? "Configure Facts" : `Configure ${selectedMode?.label ?? "the layout"}`;
   return (
-    <div className="flex flex-col gap-8">
+    <div className={`flex flex-col gap-8 ${step === 2 && isUploadedImagesMode ? "uploaded-image-workspace" : ""}`}>
       {step === 1 && (
         <section className="space-y-4">
           <div className="space-y-1">
@@ -2119,15 +2123,17 @@ export function GeneratorApp(props: GeneratorAppProps) {
       )}
 
       {step === 2 && isUploadedPagesMode && (
-        <section className="space-y-6 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
+        <div className={isUploadedImagesMode ? "grid items-start gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)]" : undefined}>
+        <section className="min-w-0 space-y-6 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
           <div className="space-y-1">
             <p className="text-xs font-semibold uppercase tracking-wide text-zinc-700">Upload Template</p>
             <h3 className="text-lg font-semibold text-zinc-900">
               {isUploadedPdfsMode ? "Uploaded PDF Pages" : "Uploaded Image Pages"}
             </h3>
             <p className="text-sm text-zinc-700">
-              Backgrounds fill the page. Content {isUploadedPdfsMode ? "PDF pages" : "images"} can stay centered
-              inside the inset or stretch to the page.
+              {isUploadedImagesMode
+                ? "Without a background, images fill the whole page. Add a background to place images inside the selected padding."
+                : "Backgrounds fill the page. Content PDF pages can stay centered inside the inset or stretch to the page."}
             </p>
           </div>
           <div className="space-y-4">
@@ -2150,7 +2156,7 @@ export function GeneratorApp(props: GeneratorAppProps) {
                 );
               })}
             </div>
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div className={`grid gap-4 sm:grid-cols-2 ${isUploadedImagesMode ? "items-start" : "xl:grid-cols-3"}`}>
               <label className="flex flex-col gap-2">
                 <span className="text-sm font-medium text-zinc-700">Number of pages</span>
                 <input
@@ -2174,7 +2180,7 @@ export function GeneratorApp(props: GeneratorAppProps) {
                   min={0}
                   step={0.01}
                   value={uploadedContentPadding}
-                  disabled={uploadedStretchContentImages}
+                  disabled={uploadedStretchContentImages || (isUploadedImagesMode && uploadedBackgroundFiles.length === 0)}
                   onChange={(event) => {
                     const nextValue = Number(event.target.value);
                     setUploadedContentPadding(Number.isNaN(nextValue) ? 0 : Math.max(0, nextValue));
@@ -2182,11 +2188,13 @@ export function GeneratorApp(props: GeneratorAppProps) {
                   className="w-32 rounded-md border border-zinc-300 px-3 py-2 text-sm text-zinc-900 focus:border-black focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-400"
                 />
                 <span className="text-xs text-zinc-500">
-                  {uploadedStretchContentImages
-                    ? "Ignored while stretch mode is enabled."
-                    : isUploadedImagesMode && uploadedImageFrameEnabled
-                      ? `Use 0 to fit the framed image inside the page bounds.`
-                      : "Use 0 to fit content to the full page bounds."}
+                  {isUploadedImagesMode && uploadedBackgroundFiles.length === 0
+                    ? "No background: images fill the page without padding."
+                    : uploadedStretchContentImages
+                      ? "Ignored while stretch mode is enabled."
+                      : isUploadedImagesMode && uploadedImageFrameEnabled
+                        ? `Use 0 to fit the framed image inside the page bounds.`
+                        : "Use 0 to fit content to the full page bounds."}
                 </span>
               </label>
               <label className="flex items-center justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
@@ -2303,7 +2311,7 @@ export function GeneratorApp(props: GeneratorAppProps) {
           <div
             className={
               isUploadedImagesMode
-                ? "grid gap-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]"
+                ? "grid gap-4"
                 : "grid gap-4 lg:grid-cols-2"
             }
           >
@@ -2430,11 +2438,13 @@ export function GeneratorApp(props: GeneratorAppProps) {
                 inputId="content-upload"
                 label="Content images"
                 description={
-                  uploadedStretchContentImages
-                    ? "Stretched horizontally and vertically to match the full PDF page."
-                    : uploadedImageFrameEnabled
-                      ? `Centered with a ${uploadedImageFrameThickness.toFixed(2)}in ${uploadedImageFrameColor} ${uploadedImageFrameStyle} frame around the image and ${uploadedContentPadding.toFixed(2)}in page padding.`
-                      : `Centered and fitted with ${uploadedContentPadding.toFixed(2)}in padding.`
+                  uploadedBackgroundFiles.length === 0
+                    ? "No background: each image fills the entire page without margins."
+                    : uploadedStretchContentImages
+                      ? "Stretched horizontally and vertically to match the full PDF page."
+                      : uploadedImageFrameEnabled
+                        ? `Centered with a ${uploadedImageFrameThickness.toFixed(2)}in ${uploadedImageFrameColor} ${uploadedImageFrameStyle} frame around the image and ${uploadedContentPadding.toFixed(2)}in page padding.`
+                        : `Centered and fitted with ${uploadedContentPadding.toFixed(2)}in padding.`
                 }
                 files={uploadedContentFiles}
                 onFilesSelected={handleUploadedContentFiles}
@@ -2569,6 +2579,31 @@ export function GeneratorApp(props: GeneratorAppProps) {
           {error && <p className="text-sm text-red-600">{error}</p>}
           {successMessage && <p className="text-sm text-emerald-600">{successMessage}</p>}
         </section>
+        {isUploadedImagesMode && (
+          <UploadedImagePreview
+            contentFiles={uploadedContentFiles}
+            backgroundFiles={uploadedBackgroundFiles}
+            pageSize={pageSize}
+            options={{
+              totalPages: pageCount,
+              contentPadding: (Number.isFinite(uploadedContentPadding) ? uploadedContentPadding : 0.32) * 72,
+              sequentialBackgroundImages: uploadedSequentialBackgroundImages,
+              fineTuneBackgrounds: uploadedFineTuneBackgrounds,
+              backgroundlessContentImageIndexes: uploadedBackgroundlessContentImageIndexes,
+              stretchContentImages: uploadedStretchContentImages,
+              cropBackgroundlessContentImages: uploadedCropBackgroundlessContentImages,
+              imageFrameEnabled: uploadedImageFrameEnabled,
+              imageFrameThickness: (Number.isFinite(uploadedImageFrameThickness) ? uploadedImageFrameThickness : 0.03) * 72,
+              imageFrameStyle: uploadedImageFrameStyle,
+              imageFrameColor: uploadedImageFrameColor,
+              imageFrameRoundedCorners: uploadedImageFrameRoundedCorners,
+              showPageNumbers: uploadedShowPageNumbers,
+              pageNumberPosition: uploadedPageNumberPosition,
+              pageNumberColor: getNumberBadgeColorOption(numberBadgeColor).hex,
+            }}
+          />
+        )}
+        </div>
       )}
 
       {step === 2 && !isUploadedPagesMode && (
@@ -3573,6 +3608,10 @@ export function GeneratorApp(props: GeneratorAppProps) {
       )}
     </div>
   );
+}
+
+function parseLayoutMode(value: string | null): ModeValue {
+  return MODES.find((option) => option.value === value)?.value ?? "full-fact";
 }
 
 function parseWizardStep(value: string | null): WizardStep {

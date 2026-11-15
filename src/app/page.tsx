@@ -25,7 +25,7 @@ export default async function HomePage() {
 
   return (
     <main className="min-h-screen bg-zinc-50 py-12">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4">
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 has-[.uploaded-image-workspace]:max-w-[1600px]">
         <header className="flex flex-col items-center gap-4 text-center">
           <p className="text-base font-semibold uppercase tracking-[0.2em] text-zinc-700 sm:text-lg">
             Picture Book Studio

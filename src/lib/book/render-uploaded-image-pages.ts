@@ -11,18 +11,18 @@ import {
   type ImageFrameStyle,
 } from "./image-frame";
 
+import {
+  getUploadedPageSequence,
+  getImagePlacement,
+  getImageFrameBounds,
+  getPageNumberCenter,
+  PAGE_NUMBER_RADIUS,
+  type ImageBounds,
+} from "./uploaded-image-layout";
+
 const DEFAULT_CONTENT_PADDING = 0.32 * POINTS_PER_INCH;
-const PAGE_NUMBER_PADDING = 0.35 * POINTS_PER_INCH;
-const PAGE_NUMBER_RADIUS = 0.24 * POINTS_PER_INCH;
 const PAGE_NUMBER_TEXT_COLOR = rgb(1, 1, 1);
 type PageNumberPosition = "alternating" | "center";
-
-interface ImageBounds {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
 
 export interface RenderUploadedImagePagesOptions {
   backgroundImageAssets?: ImageAsset[];
@@ -83,24 +83,16 @@ export async function renderUploadedImagePages(options: RenderUploadedImagePages
     : 0;
   const frameColor = hexToRgb(getImageFrameColorOption(imageFrameColor).hex);
   const pageNumberFont = showPageNumbers ? await pdf.embedFont(StandardFonts.HelveticaBold) : null;
-  const backgroundlessContentIndexes = fineTuneBackgrounds
-    ? new Set(backgroundlessContentImageIndexes.filter((index) => index < contentImages.length))
-    : new Set<number>();
-  let backgroundPageIndex = 0;
+  const sequence = getUploadedPageSequence(
+    pageCount, contentImages.length, backgroundImages.length, sequentialBackgroundImages,
+    fineTuneBackgrounds ? backgroundlessContentImageIndexes : [],
+  );
 
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
     const page = pdf.addPage([pageWidth, pageHeight]);
-    const contentIndex = pageIndex % contentImages.length;
-    const isBackgroundlessContent = backgroundlessContentIndexes.has(contentIndex);
-    const shouldDrawBackground = !isBackgroundlessContent;
-    if (shouldDrawBackground && backgroundImages.length) {
-      const backgroundIndex = resolveBackgroundIndex(
-        backgroundPageIndex,
-        backgroundImages.length,
-        sequentialBackgroundImages
-      );
+    const { contentIndex, isBackgroundless: isBackgroundlessContent, backgroundIndex } = sequence[pageIndex];
+    if (backgroundIndex !== null) {
       drawStretchedImage(page, backgroundImages[backgroundIndex], pageWidth, pageHeight);
-      backgroundPageIndex += 1;
     } else {
       drawWhiteBackground(page, pageWidth, pageHeight);
     }
@@ -167,16 +159,6 @@ async function embedImages(pdf: PDFDocument, assets: ImageAsset[]) {
   return images;
 }
 
-function resolveBackgroundIndex(pageIndex: number, backgroundCount: number, sequentialBackgroundImages: boolean) {
-  if (sequentialBackgroundImages) {
-    return pageIndex % backgroundCount;
-  }
-  if (backgroundCount <= 1 || pageIndex === 0) {
-    return 0;
-  }
-  return (Math.floor((pageIndex - 1) / 2) + 1) % backgroundCount;
-}
-
 function drawStretchedImage(page: PDFPage, image: PDFImage, pageWidth: number, pageHeight: number): ImageBounds {
   page.drawImage(image, {
     x: 0,
@@ -194,11 +176,7 @@ function drawCroppedImage(
   pageWidth: number,
   pageHeight: number
 ): ImageBounds {
-  const scale = Math.max(pageWidth / assetMeta.width, pageHeight / assetMeta.height);
-  const width = assetMeta.width * scale;
-  const height = assetMeta.height * scale;
-  const x = (pageWidth - width) / 2;
-  const y = (pageHeight - height) / 2;
+  const { x, y, width, height } = getImagePlacement(assetMeta, pageWidth, pageHeight, 0, "cover");
   page.drawImage(image, { x, y, width, height });
   return { x: 0, y: 0, width: pageWidth, height: pageHeight };
 }
@@ -211,13 +189,7 @@ function drawContainedImage(
   pageHeight: number,
   padding: number
 ): ImageBounds {
-  const availableWidth = Math.max(1, pageWidth - padding * 2);
-  const availableHeight = Math.max(1, pageHeight - padding * 2);
-  const scale = Math.min(availableWidth / assetMeta.width, availableHeight / assetMeta.height);
-  const width = assetMeta.width * scale;
-  const height = assetMeta.height * scale;
-  const x = (pageWidth - width) / 2;
-  const y = (pageHeight - height) / 2;
+  const { x, y, width, height } = getImagePlacement(assetMeta, pageWidth, pageHeight, padding, "contain");
 
   page.drawImage(image, { x, y, width, height });
   return { x, y, width, height };
@@ -233,12 +205,7 @@ function drawImageFrame(
   color: ReturnType<typeof rgb>,
   roundedCorners: boolean
 ) {
-  const x = Math.max(thickness / 2, bounds.x - thickness / 2);
-  const y = Math.max(thickness / 2, bounds.y - thickness / 2);
-  const right = Math.min(pageWidth - thickness / 2, bounds.x + bounds.width + thickness / 2);
-  const top = Math.min(pageHeight - thickness / 2, bounds.y + bounds.height + thickness / 2);
-  const width = Math.max(0, right - x);
-  const height = Math.max(0, top - y);
+  const { x, y, width, height, top, radius } = getImageFrameBounds(bounds, pageWidth, pageHeight, thickness);
   const borderOptions = {
     borderColor: color,
     borderWidth: thickness,
@@ -249,7 +216,6 @@ function drawImageFrame(
 
   if (roundedCorners && width > 0 && height > 0) {
     // Keep straight sides even on narrow images, and scale the corners for thick frames.
-    const radius = Math.min(Math.max(12, thickness * 2), width / 4, height / 4);
     const path = [
       `M ${radius} 0`,
       `H ${width - radius}`,
@@ -277,14 +243,7 @@ function drawPageNumber(
   pageWidth: number,
   position: PageNumberPosition
 ) {
-  const isEvenPage = pageNumber % 2 === 0;
-  const centerX =
-    position === "center"
-      ? pageWidth / 2
-      : isEvenPage
-        ? PAGE_NUMBER_PADDING + PAGE_NUMBER_RADIUS
-        : pageWidth - PAGE_NUMBER_PADDING - PAGE_NUMBER_RADIUS;
-  const centerY = PAGE_NUMBER_PADDING + PAGE_NUMBER_RADIUS;
+  const { x: centerX, y: centerY } = getPageNumberCenter(pageWidth, pageNumber, position);
   page.drawCircle({
     x: centerX,
     y: centerY,

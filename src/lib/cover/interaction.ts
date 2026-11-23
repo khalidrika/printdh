@@ -49,3 +49,29 @@ export function coverViewport(width: number, height: number, viewportWidth: numb
   const spaceHeight = Math.max(viewportHeight, artHeight + VIEWPORT_PADDING * 2);
   return { artWidth, artHeight, spaceWidth, spaceHeight, left: (spaceWidth - artWidth) / 2, top: (spaceHeight - artHeight) / 2 };
 }
+
+export type Bounds = { x: number; y: number; width: number; height: number };
+export type SnapTargets = { x: number[]; y: number[] };
+export function closestSnap(values: number[], targets: number[], tolerance: number) {
+  let best: { delta: number; guide: number } | null = null;
+  for (const value of values) for (const target of targets) {
+    const delta = target - value;
+    if (Math.abs(delta) <= tolerance && (!best || Math.abs(delta) < Math.abs(best.delta))) best = { delta, guide: target };
+  }
+  return best;
+}
+export function snapMove(bounds: Bounds, targets: SnapTargets, tolerance: number) {
+  const x = closestSnap([bounds.x, bounds.x + bounds.width / 2, bounds.x + bounds.width], targets.x, tolerance);
+  const y = closestSnap([bounds.y, bounds.y + bounds.height / 2, bounds.y + bounds.height], targets.y, tolerance);
+  return { dx: x?.delta ?? 0, dy: y?.delta ?? 0, guides: { x: x?.guide, y: y?.guide } };
+}
+export function snapResize(bounds: Bounds, handle: ResizeHandle, targets: SnapTargets, tolerance: number) {
+  const d = handleDirection(handle);
+  const x = d.x ? closestSnap([bounds.x + (d.x > 0 ? bounds.width : 0)], targets.x, tolerance) : null;
+  const y = d.y ? closestSnap([bounds.y + (d.y > 0 ? bounds.height : 0)], targets.y, tolerance) : null;
+  const validX = x && bounds.width + d.x * x.delta >= 8 && bounds.width + d.x * x.delta <= 5000 ? x : null;
+  const validY = y && bounds.height + d.y * y.delta >= 8 && bounds.height + d.y * y.delta <= 5000 ? y : null;
+  return { bounds: { x: bounds.x + (d.x < 0 ? validX?.delta ?? 0 : 0), y: bounds.y + (d.y < 0 ? validY?.delta ?? 0 : 0),
+    width: bounds.width + d.x * (validX?.delta ?? 0), height: bounds.height + d.y * (validY?.delta ?? 0) },
+    guides: { x: validX?.guide, y: validY?.guide } };
+}

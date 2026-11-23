@@ -5,10 +5,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { COVER_FONTS, PAPER_TYPES, coverGeometry, coverProjectSchema, coverWarnings, createCover, type CoverLayer, type CoverProject } from "@/lib/cover/model";
 import { readCover, writeCover } from "@/lib/cover/storage";
 import { exportCoverPdf, loadCoverImage, renderCover, type ImageCache } from "@/lib/cover/render";
-import { RESIZE_HANDLES, coverViewport, extendLayerToSpine, fitCoverScale, handleDirection, resizeCoverLayer, type ResizeHandle } from "@/lib/cover/interaction";
+import { RESIZE_HANDLES, coverViewport, extendLayerToSpine, fitCoverScale, handleDirection, resizeCoverLayer, type ResizeHandle, snapMove, snapResize } from "@/lib/cover/interaction";
+import { selectionBounds, selectionForLayer, coverSnapTargets, cropImageDrag } from "@/lib/cover/editor";
+import { ReferenceTools, SpineTools, ProjectLibrary } from "./CoverStudioTools";
 
 type History = { past: CoverProject[]; present: CoverProject; future: CoverProject[] };
-type Gesture = { type: "move" | "resize" | "rotate"; handle?: ResizeHandle; start: { x: number; y: number }; layer: CoverLayer; project: CoverProject; draft: CoverProject; pointerId: number };
+type Gesture = { type: "move" | "resize" | "rotate" | "crop"; ids: string[]; handle?: ResizeHandle; start: { x: number; y: number }; layer: CoverLayer; project: CoverProject; draft: CoverProject; pointerId: number };
 const TRIMS = [[6, 9], [8.5, 8.5], [8.5, 11], [8.25, 11], [5, 8]];
 
 function download(blob: Blob, filename: string) {
@@ -29,7 +31,18 @@ function fileDataUrl(file: File): Promise<string> {
 export function CoverStudio() {
   const [history, setHistory] = useState<History>(() => ({ past: [], present: createCover(), future: [] }));
   const [draft, setDraft] = useState<CoverProject | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const selectedId = selectedIds[0] ?? null;
+  const [cropEditing, setCropEditing] = useState(false);
+  const [snapping, setSnapping] = useState(true);
+  const [snapGuides, setSnapGuides] = useState<{ x?: number; y?: number }>({});
+  const [colorPick, setColorPick] = useState<((color: string) => void) | null>(null);
+  function setSelectedId(id: string | null) { setSelectedIds(id ? [id] : []); setCropEditing(false); }
+  function chooseLayer(layer: CoverLayer, additive = false) {
+    const ids = selectionForLayer(project, layer);
+    setSelectedIds(current => additive ? ids.every(id => current.includes(id)) ? current.filter(id => !ids.includes(id)) : [...new Set([...current, ...ids])] : ids);
+    setCropEditing(false);
+  }
   const [ready, setReady] = useState(false);
   const [saveState, setSaveState] = useState("Opening your draft…");
   const [notice, setNotice] = useState("");
@@ -62,6 +75,9 @@ export function CoverStudio() {
   const scale = zoom ?? fitScale;
   const view = coverViewport(geometry.width, geometry.height, viewportSize.width, viewportSize.height, scale);
   const selected = project.layers.find((layer) => layer.id === selectedId);
+  const selectedLayers = project.layers.filter(l => selectedIds.includes(l.id));
+  const bounds = selectionBounds(selectedLayers);
+  const selectionLocked = selectedLayers.some(l => l.locked);
   const warnings = useMemo(() => [...coverWarnings(project), ...clippedText], [project, clippedText]);
 
   const changeZoom = useCallback((next: number | null, client?: { x: number; y: number }) => {
@@ -139,15 +155,31 @@ export function CoverStudio() {
     commit((p) => ({ ...p, layers: p.layers.map((layer) => layer.id === id ? { ...layer, ...patch } as CoverLayer : layer) }));
   }, [commit]);
   const removeSelected = useCallback(() => {
-    if (!selected || selected.locked) return;
-    commit((p) => ({ ...p, layers: p.layers.filter((layer) => layer.id !== selected.id) }));
-    setSelectedId(null);
-  }, [commit, selected]);
+    if (!selectedIds.length || selectionLocked) return;
+    commit((p) => ({ ...p, layers: p.layers.filter((layer) => !selectedIds.includes(layer.id)) }));
+    setSelectedIds([]); setCropEditing(false);
+  }, [commit, selectedIds, selectionLocked]);
   const duplicate = useCallback(() => {
-    if (!selected || project.layers.length >= 200) return;
-    const copy = { ...selected, id: crypto.randomUUID(), name: `${selected.name.slice(0, 140)} copy`, x: selected.x + 12, y: selected.y + 12, locked: false };
-    commit((p) => ({ ...p, layers: [...p.layers, copy] })); setSelectedId(copy.id);
-  }, [selected, project.layers.length, commit]);
+    if (!selectedLayers.length || project.layers.length + selectedLayers.length > 200) return;
+    const groups = new Map<string, string>();
+    const copies = selectedLayers.map(layer => {
+      if (layer.groupId && !groups.has(layer.groupId)) groups.set(layer.groupId, crypto.randomUUID());
+      return { ...layer, id: crypto.randomUUID(), name: `${layer.name.slice(0, 140)} copy`, x: Math.min(5000, layer.x + 12), y: Math.min(5000, layer.y + 12), locked: false,
+        groupId: layer.groupId ? groups.get(layer.groupId) : undefined, spineRole: undefined };
+    });
+    commit((p) => ({ ...p, layers: [...p.layers, ...copies] })); setSelectedIds(copies.map(l => l.id)); setCropEditing(false);
+  }, [selectedLayers, project.layers.length, commit]);
+  function groupSelection(ungroup = false) {
+    if (selectionLocked) return;
+    const groupId = ungroup ? undefined : crypto.randomUUID();
+    commit(p => ({ ...p, layers: p.layers.map(l => selectedIds.includes(l.id) ? { ...l, groupId } : l) }));
+  }
+  function centerSelection(target: "front" | "back" | "all") {
+    if (!selectedLayers.length || selectionLocked) return;
+    const area = target === "all" ? { x: 0, y: 0, width: geometry.width, height: geometry.height } : geometry[target];
+    const dx = area.x + (area.width - bounds.width) / 2 - bounds.x, dy = area.y + (area.height - bounds.height) / 2 - bounds.y;
+    commit(p => ({ ...p, layers: p.layers.map(l => selectedIds.includes(l.id) ? { ...l, x: l.x + dx, y: l.y + dy } : l) }));
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -185,17 +217,17 @@ export function CoverStudio() {
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
       const target = event.target as HTMLElement;
-      if (target.closest("input, textarea, select, [contenteditable]")) return;
+      if (target.closest("input, textarea, select, [contenteditable], dialog")) return;
       if (event.code === "Space") { event.preventDefault(); setSpaceHeld(true); return; }
       if (gesture.current || panGesture.current) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); }
       else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d") { event.preventDefault(); duplicate(); }
       else if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); removeSelected(); }
-      else if (event.key === "Escape") setSelectedId(null);
-      else if (selected && !selected.locked && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      else if (event.key === "Escape") { setSelectedId(null); setColorPick(null); }
+      else if (selected && !selectionLocked && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
         event.preventDefault();
         const distance = event.shiftKey ? 10 : 1;
-        updateLayer(selected.id, { x: selected.x + (event.key === "ArrowLeft" ? -distance : event.key === "ArrowRight" ? distance : 0), y: selected.y + (event.key === "ArrowUp" ? -distance : event.key === "ArrowDown" ? distance : 0) });
+        commit(p => ({ ...p, layers: p.layers.map(l => selectedIds.includes(l.id) ? { ...l, x: Math.max(-5000, Math.min(5000, l.x + (event.key === "ArrowLeft" ? -distance : event.key === "ArrowRight" ? distance : 0))), y: Math.max(-5000, Math.min(5000, l.y + (event.key === "ArrowUp" ? -distance : event.key === "ArrowDown" ? distance : 0))) } : l) }));
       }
     }
     const releaseSpace = (event: KeyboardEvent) => { if (event.code === "Space") setSpaceHeld(false); };
@@ -204,7 +236,7 @@ export function CoverStudio() {
     window.addEventListener("keyup", releaseSpace);
     window.addEventListener("blur", blur);
     return () => { window.removeEventListener("keydown", keydown); window.removeEventListener("keyup", releaseSpace); window.removeEventListener("blur", blur); };
-  }, [selected, undo, redo, duplicate, removeSelected, updateLayer]);
+  }, [selected, selectedIds, selectionLocked, commit, undo, redo, duplicate, removeSelected]);
 
   function addLayer(type: "text" | "rect" | "ellipse") {
     if (project.layers.length >= 200) { setNotice("This project already has 200 layers."); return; }
@@ -267,26 +299,49 @@ export function CoverStudio() {
   }
   function startGesture(event: PointerEvent, layer: CoverLayer, type: Gesture["type"], handle?: ResizeHandle) {
     if (event.button !== 0 || gesture.current) return;
-    event.stopPropagation(); setSelectedId(layer.id);
-    if (layer.locked) return;
+    event.stopPropagation();
+    if (event.shiftKey && type === "move" && !cropEditing) { chooseLayer(layer, true); return; }
+    const ids = selectedIds.includes(layer.id) ? selectedIds : selectionForLayer(project, layer);
+    if (!selectedIds.includes(layer.id)) { setSelectedIds(ids); setCropEditing(false); }
+    if (project.layers.some(l => ids.includes(l.id) && l.locked)) return;
     event.preventDefault();
-    gesture.current = { type, handle, layer, project: history.present, draft: history.present, start: pointerPosition(event), pointerId: event.pointerId };
+    gesture.current = { type: type === "move" && cropEditing && selectedId === layer.id && layer.type === "image" ? "crop" : type, ids, handle, layer, project: history.present, draft: history.present, start: pointerPosition(event), pointerId: event.pointerId };
     svgRef.current?.setPointerCapture(event.pointerId);
   }
   function moveGesture(event: PointerEvent<SVGSVGElement>) {
     const current = gesture.current;
     if (!current || event.pointerId !== current.pointerId) return;
     const point = pointerPosition(event), layer = current.layer;
-    const dx = point.x - current.start.x, dy = point.y - current.start.y;
+    let dx = point.x - current.start.x, dy = point.y - current.start.y;
+    const targets = coverSnapTargets(current.project, current.ids);
+    setSnapGuides({});
+    if (current.type === "move") {
+      const moving = current.project.layers.filter(l => current.ids.includes(l.id));
+      const box = selectionBounds(moving);
+      if (snapping && !event.altKey) {
+        const snap = snapMove({ ...box, x: box.x + dx, y: box.y + dy }, targets, 6 / scale);
+        dx += snap.dx; dy += snap.dy; setSnapGuides(snap.guides);
+      }
+      dx = Math.max(...moving.map(l => -5000 - l.x), Math.min(dx, ...moving.map(l => 5000 - l.x)));
+      dy = Math.max(...moving.map(l => -5000 - l.y), Math.min(dy, ...moving.map(l => 5000 - l.y)));
+      current.draft = { ...current.project, layers: current.project.layers.map(l => current.ids.includes(l.id) ? { ...l, x: l.x + dx, y: l.y + dy } : l) };
+      setDraft(current.draft); return;
+    }
     let patch: Partial<CoverLayer>;
-    if (current.type === "move") patch = { x: Math.max(-5000, Math.min(5000, layer.x + dx)), y: Math.max(-5000, Math.min(5000, layer.y + dy)) };
+    if (current.type === "crop" && layer.type === "image") patch = cropImageDrag(layer, dx, dy);
     else if (current.type === "rotate") {
       const cx = layer.x + layer.width / 2, cy = layer.y + layer.height / 2;
       let angle = layer.rotation + (Math.atan2(point.y - cy, point.x - cx) - Math.atan2(current.start.y - cy, current.start.x - cx)) * 180 / Math.PI;
       if (event.shiftKey) angle = Math.round(angle / 15) * 15;
       patch = { rotation: ((angle + 540) % 360) - 180 };
     } else {
-      patch = resizeCoverLayer(layer, current.handle ?? "se", dx, dy, event.shiftKey || (layer.type === "image" && imageResizeMode === "proportional"));
+      const proportional = event.shiftKey || (layer.type === "image" && imageResizeMode === "proportional");
+      let resized = resizeCoverLayer(layer, current.handle ?? "se", dx, dy, proportional);
+      if (snapping && !event.altKey && !proportional && layer.rotation === 0) {
+        const snap = snapResize(resized, current.handle ?? "se", targets, 6 / scale);
+        resized = snap.bounds; setSnapGuides(snap.guides);
+      }
+      patch = resized;
       if (layer.type === "image" && !event.shiftKey && imageResizeMode !== "proportional") patch = { ...patch, fit: imageResizeMode === "stretch" ? "stretch" : "cover" };
     }
     current.draft = { ...current.project, layers: current.project.layers.map((l) => l.id === layer.id ? { ...l, ...patch } as CoverLayer : l) };
@@ -295,7 +350,7 @@ export function CoverStudio() {
   function endGesture(event: PointerEvent<SVGSVGElement>, cancel = false) {
     const current = gesture.current;
     if (!current || event.pointerId !== current.pointerId) return;
-    gesture.current = null;
+    gesture.current = null; setSnapGuides({});
     if (svgRef.current?.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId);
     setDraft(null);
     if (!cancel && current.draft !== current.project) commit(current.draft);
@@ -341,11 +396,26 @@ export function CoverStudio() {
     updateProject({ layers });
   }
   function placeOn(target: "front" | "back" | "all") {
+    if (selectedLayers.length > 1) { centerSelection(target); return; }
     if (!selected || selected.locked) return;
     const area = target === "all" ? { x: 0, y: 0, width: geometry.width, height: geometry.height } : geometry[target];
     if (selected.type === "text") updateLayer(selected.id, { x: area.x + (area.width - selected.width) / 2, y: area.y + (area.height - selected.height) / 2 });
     else updateLayer(selected.id, { rotation: 0, x: target === "all" || area.x === geometry.bleed ? 0 : area.x, y: 0,
       width: area.width + (target === "all" ? 0 : geometry.bleed), height: geometry.height });
+  }
+
+  function beginCrop(layer: CoverLayer) {
+    if (layer.type !== "image" || layer.locked || layer.groupId) return;
+    setSelectedIds([layer.id]); setCropEditing(true);
+    if (layer.fit !== "cover") updateLayer(layer.id, { fit: "cover" });
+  }
+  function sampleColor(event: PointerEvent<SVGSVGElement>) {
+    if (!colorPick || event.button !== 0 || !canvasRef.current) return;
+    event.preventDefault(); event.stopPropagation();
+    const point = pointerPosition(event), canvas = canvasRef.current;
+    if (point.x < 0 || point.y < 0 || point.x >= geometry.width || point.y >= geometry.height) return;
+    const pixel = canvas.getContext("2d")?.getImageData(Math.min(canvas.width - 1, Math.floor(point.x / geometry.width * canvas.width)), Math.min(canvas.height - 1, Math.floor(point.y / geometry.height * canvas.height)), 1, 1).data;
+    if (pixel) { colorPick(`#${[...pixel].slice(0, 3).map(c => c.toString(16).padStart(2, "0")).join("")}`); setColorPick(null); setNotice("Color picked. Use Apply spine color to add it to the spine."); }
   }
 
   return (
@@ -354,6 +424,7 @@ export function CoverStudio() {
         <div className="cover-brand"><Link href="/" aria-label="Back to Picture Book Studio" className="cover-home">▧</Link><div><h1>Cover Studio</h1><p>Design your paperback cover</p></div></div>
         <div className="cover-actions">
           <span className="cover-save" role="status">{saveState}</span>
+          {ready && <ProjectLibrary project={history.present} onOpen={p => { commit(p); setSelectedId(null); setNotice("Cover opened from your library. Undo restores your previous design."); }} />}
           <button disabled={!ready} onClick={() => projectInput.current?.click()}>Open project</button>
           <button disabled={!ready} onClick={() => download(new Blob([JSON.stringify(history.present)], { type: "application/json" }), `${filename(project.title)}.cover.json`)}>Save project</button>
           <button className="cover-primary" disabled={!ready || exporting || !!renderError} onClick={exportPdf}>{exporting ? "Exporting…" : "Download PDF · 300 DPI"}</button>
@@ -367,6 +438,7 @@ export function CoverStudio() {
           <div><button onClick={() => addLayer("text")}>T · Add text</button><button onClick={() => imageInput.current?.click()}>Add image</button><button onClick={() => addLayer("rect")}>Rectangle</button><button onClick={() => addLayer("ellipse")}>Ellipse</button></div>
           <div><button disabled={!history.past.length || !!draft} onClick={undo}>Undo</button><button disabled={!history.future.length || !!draft} onClick={redo}>Redo</button>
             <label className="cover-inline"><input type="checkbox" checked={guides} onChange={(e) => setGuides(e.target.checked)} />Print guides</label>
+            <label className="cover-inline"><input type="checkbox" checked={snapping} onChange={e => setSnapping(e.target.checked)} />Snap</label>
             <button aria-pressed={tool === "select"} onClick={() => setTool("select")}>Select</button>
             <button aria-pressed={tool === "pan"} onClick={() => setTool("pan")} title="Drag to pan. You can also hold Space or use the middle mouse button.">Hand</button>
             <div className="cover-zoom-controls">
@@ -395,6 +467,8 @@ export function CoverStudio() {
             <label className="cover-inline"><input type="checkbox" checked={project.customSpine !== null} onChange={(e) => updateProject({ customSpine: e.target.checked ? geometry.spine / 72 : null })} />Set spine width manually</label>
             {project.customSpine !== null && <NumberField label="Spine width (in)" value={project.customSpine} min={0.01} max={3} step={0.001} onChange={(customSpine) => updateProject({ customSpine })} />}
             <ColorField label="Cover background" value={project.background} onChange={(background) => updateProject({ background })} />
+            <ReferenceTools project={project} onChange={updateProject} />
+            <SpineTools project={project} onChange={updateProject} pickColor={callback => { setTool("select"); setColorPick(() => callback); setNotice("Click a color on the cover artwork. Escape cancels the picker."); }} />
             <div className="cover-measurements"><p>Full cover <strong>{(geometry.width / 72).toFixed(3)} × {(geometry.height / 72).toFixed(3)} in</strong></p><p>Spine <strong>{(geometry.spine / 72).toFixed(3)} in</strong></p><p>Bleed <strong>0.125 in</strong></p></div>
             <p className="cover-hint">Paperback dimensions. Recheck placement after changing book size. Use the final manuscript page count.</p>
             <a className="cover-source" href="https://kdp.amazon.com/cover-calculator" target="_blank" rel="noreferrer">Check with the KDP cover calculator</a>
@@ -402,30 +476,31 @@ export function CoverStudio() {
           </aside>
 
           <section className="cover-center" aria-label="Cover design canvas">
-            <div className="cover-canvas-header"><span>BACK + SPINE + FRONT</span><span>Wheel to zoom · Space + drag to pan · drag any handle to resize</span></div>
+            <div className="cover-canvas-header"><span>BACK + SPINE + FRONT</span><span>Wheel: zoom · Space: pan · Shift-click: multi-select · Alt: skip snapping</span></div>
             <div className="cover-image-tools">
               <label>Resize image<select aria-label="Image resize mode" value={imageResizeMode} onChange={(e) => setImageResizeMode(e.target.value as typeof imageResizeMode)}>
                 <option value="stretch">Free stretch</option><option value="proportional">Keep proportions</option><option value="crop">Crop frame</option>
               </select></label>
-              <div className="cover-button-row"><button disabled={selected?.type !== "image" || selected.locked || selected.rotation !== 0} onClick={() => extendToSpine(false)}>Extend to spine center</button><button disabled={selected?.type !== "image" || selected.locked || selected.rotation !== 0} onClick={() => extendToSpine(true)}>Cover whole spine</button></div>
+              <div className="cover-button-row"><button disabled={selectedLayers.length !== 1 || selected?.type !== "image" || selected.locked || selected.rotation !== 0} onClick={() => extendToSpine(false)}>Extend to spine center</button><button disabled={selectedLayers.length !== 1 || selected?.type !== "image" || selected.locked || selected.rotation !== 0} onClick={() => extendToSpine(true)}>Cover whole spine</button></div>
               <p className="cover-hint">{selected?.type === "image" && selected.rotation !== 0 ? "Set rotation to 0° to use the spine buttons." : "For two cover images, select each and extend to the spine center. Hold Shift while resizing to keep proportions."}</p>
             </div>
-            <div ref={viewportRef} className={`cover-canvas-scroll${tool === "pan" || spaceHeld ? " is-pan" : ""}${panning ? " is-panning" : ""}`}
+            <div ref={viewportRef} className={`cover-canvas-scroll${colorPick ? " is-color-pick" : ""}${cropEditing ? " is-cropping" : ""}${tool === "pan" || spaceHeld ? " is-pan" : ""}${panning ? " is-panning" : ""}`}
               onPointerDownCapture={startPan} onPointerMoveCapture={movePan} onPointerUpCapture={endPan} onPointerCancelCapture={endPan} onLostPointerCapture={endPan}
               onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={(e) => { e.preventDefault(); void addImages(Array.from(e.dataTransfer.files)); }}>
               <div className="cover-canvas-plane" style={{ width: view.spaceWidth, height: view.spaceHeight }}>
               <div ref={artboardRef} className="cover-artboard" style={{ width: view.artWidth, height: view.artHeight, left: view.left, top: view.top }}>
                 <canvas ref={canvasRef} aria-label="Rendered cover artwork" />
+                {project.reference && !project.reference.hidden && <div className="cover-reference" aria-label="KDP reference overlay" style={{ left: project.reference.x * scale, top: project.reference.y * scale, width: project.reference.width * scale, height: project.reference.height * scale, opacity: project.reference.opacity, backgroundImage: `url("${project.reference.dataUrl}")` }} /> }
                 <svg ref={svgRef} className="cover-interaction" viewBox={`0 0 ${geometry.width} ${geometry.height}`} aria-label="Editable cover layers"
-                  onPointerDown={(e) => { if (e.button === 0) setSelectedId(null); }} onPointerMove={moveGesture} onPointerUp={(e) => endGesture(e)} onPointerCancel={(e) => endGesture(e, true)} onLostPointerCapture={(e) => endGesture(e, true)}>
+                  onPointerDownCapture={sampleColor} onPointerDown={(e) => { if (e.button === 0) setSelectedId(null); }} onPointerMove={moveGesture} onPointerUp={(e) => endGesture(e)} onPointerCancel={(e) => endGesture(e, true)} onLostPointerCapture={(e) => endGesture(e, true)}>
                   <rect width={geometry.width} height={geometry.height} fill="transparent" />
                   {project.layers.filter((l) => !l.hidden).map((layer) => <rect key={layer.id} data-layer-id={layer.id} x={layer.x} y={layer.y} width={layer.width} height={layer.height} fill="transparent"
                     transform={`rotate(${layer.rotation} ${layer.x + layer.width / 2} ${layer.y + layer.height / 2})`} className={layer.locked ? "cover-locked-layer" : "cover-move-layer"}
-                    onPointerDown={(e) => startGesture(e, layer, "move")} onDoubleClick={() => { if (layer.type === "text" && !layer.locked) textRef.current?.focus(); }} />)}
+                    onPointerDown={(e) => startGesture(e, layer, "move")} onDoubleClick={() => { if (layer.type === "text" && !layer.locked) textRef.current?.focus(); else beginCrop(layer); }} />)}
                   {guides && <CoverGuides project={project} />}
-                  {selected && !selected.hidden && <g transform={`translate(${selected.x + selected.width / 2} ${selected.y + selected.height / 2}) rotate(${selected.rotation}) translate(${-selected.width / 2} ${-selected.height / 2})`}>
+                  {selected && selectedLayers.length === 1 && !selected.hidden && <g transform={`translate(${selected.x + selected.width / 2} ${selected.y + selected.height / 2}) rotate(${selected.rotation}) translate(${-selected.width / 2} ${-selected.height / 2})`}>
                     <rect width={selected.width} height={selected.height} fill="none" stroke="#2563eb" strokeWidth={1.5} vectorEffect="non-scaling-stroke" pointerEvents="none" />
-                    {!selected.locked && <>
+                    {!selected.locked && !cropEditing && <>
                       <line x1={selected.width / 2} y1={0} x2={selected.width / 2} y2={-30 / scale} stroke="#2563eb" vectorEffect="non-scaling-stroke" pointerEvents="none" />
                       <g className="cover-rotate-handle" onPointerDown={(e) => startGesture(e, selected, "rotate")}>
                         <circle aria-label="Rotate selected layer" data-handle="rotate" cx={selected.width / 2} cy={-30 / scale} r={12 / scale} fill="transparent" />
@@ -442,6 +517,11 @@ export function CoverStudio() {
                       })}
                     </>}
                   </g>}
+                  {selectedLayers.length > 1 && <rect data-testid="selection-bounds" x={bounds.x} y={bounds.y} width={bounds.width} height={bounds.height} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="5 3" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+                  <g pointerEvents="none" stroke="#ec4899" strokeWidth={1.5} strokeDasharray="4 3">
+                    {snapGuides.x !== undefined && <line data-testid="snap-x" x1={snapGuides.x} x2={snapGuides.x} y1={0} y2={geometry.height} vectorEffect="non-scaling-stroke" />}
+                    {snapGuides.y !== undefined && <line data-testid="snap-y" y1={snapGuides.y} y2={snapGuides.y} x1={0} x2={geometry.width} vectorEffect="non-scaling-stroke" />}
+                  </g>
                 </svg>
                 {!project.layers.length && <div className="cover-empty"><strong>Your cover starts here</strong><span>Add text, or drop a cover image onto the canvas.</span><button onClick={() => imageInput.current?.click()}>Choose an image</button></div>}
               </div>
@@ -455,7 +535,14 @@ export function CoverStudio() {
 
           <aside className="cover-panel cover-properties" aria-label="Layer properties">
             <PanelTitle>{selected ? "Selected layer" : "Properties"}</PanelTitle>
-            {selected ? <>
+            {selectedLayers.length > 1 ? <>
+              <p>{selectedLayers.length} layers selected</p>
+              <div className="cover-button-row"><button disabled={selectionLocked} onClick={() => groupSelection()}>Group selection</button><button disabled={selectionLocked || !selectedLayers.some(l => l.groupId)} onClick={() => groupSelection(true)}>Ungroup</button></div>
+              <p className="cover-hint">Drag any selected layer to move the selection. Shift-click or use the layer checkboxes to select more. Locked groups must be unlocked before moving.</p>
+              <p className="cover-hint">Center selection on:</p><div className="cover-button-row">{(["front", "back", "all"] as const).map(target => <button key={target} disabled={selectionLocked} onClick={() => centerSelection(target)}>{target === "all" ? "Full cover" : target === "front" ? "Front" : "Back"}</button>)}</div>
+              <div className="cover-button-row"><button onClick={duplicate}>Duplicate selection</button><button disabled={selectionLocked} onClick={removeSelected}>Delete selection</button></div>
+            </> : selected ? <>
+              {selected.groupId && <button disabled={selected.locked} onClick={() => groupSelection(true)}>Ungroup</button>}
               <label>Layer name<input value={selected.name} maxLength={150} onChange={(e) => updateLayer(selected.id, { name: e.target.value })} /></label>
               <fieldset disabled={selected.locked} className="cover-properties-fields">
                 {selected.type === "text" && <>
@@ -466,7 +553,12 @@ export function CoverStudio() {
                   <div className="cover-field-grid"><label>Alignment<select value={selected.align} onChange={(e) => updateLayer(selected.id, { align: e.target.value as typeof selected.align })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label>Text direction<select value={selected.direction} onChange={(e) => updateLayer(selected.id, { direction: e.target.value as typeof selected.direction })}><option value="ltr">LTR</option><option value="rtl">RTL / عربي</option></select></label></div>
                 </>}
                 {selected.type !== "image" && <ColorField label={selected.type === "text" ? "Text color" : "Fill color"} value={selected.color} onChange={(color) => updateLayer(selected.id, { color })} />}
-                {selected.type === "image" && <label>Image fit<select value={selected.fit} onChange={(e) => updateLayer(selected.id, { fit: e.target.value as typeof selected.fit })}><option value="cover">Fill & crop</option><option value="contain">Fit entire image</option><option value="stretch">Stretch</option></select></label>}
+                {selected.type === "image" && <><label>Image fit<select value={selected.fit} onChange={(e) => { setCropEditing(false); updateLayer(selected.id, { fit: e.target.value as typeof selected.fit }); }}><option value="cover">Fill & crop</option><option value="contain">Fit entire image</option><option value="stretch">Stretch</option></select></label>
+                  <button onClick={() => cropEditing ? setCropEditing(false) : beginCrop(selected)}>{cropEditing ? "Done editing image" : "Edit image inside frame"}</button>
+                  {cropEditing && <><p className="cover-hint">Drag the image on the canvas to reframe it. The frame stays fixed.</p>
+                    <label>Image zoom · {Math.round((selected.cropZoom ?? 1) * 100)}%<input aria-label="Image crop zoom" type="range" min={1} max={8} step={0.05} value={selected.cropZoom ?? 1} onChange={e => updateLayer(selected.id, { fit: "cover", cropZoom: Number(e.target.value) })} /></label>
+                    <button onClick={() => updateLayer(selected.id, { fit: "cover", cropZoom: 1, cropX: 0, cropY: 0 })}>Reset image crop</button></>}
+                </>}
                 <div className="cover-field-grid"><NumberField label="X (in)" value={selected.x / 72} min={-69} max={69} step={0.01} onChange={(x) => updateLayer(selected.id, { x: x * 72 })} /><NumberField label="Y (in)" value={selected.y / 72} min={-69} max={69} step={0.01} onChange={(y) => updateLayer(selected.id, { y: y * 72 })} /><NumberField label="Width (in)" value={selected.width / 72} min={0.02} max={69} step={0.01} onChange={(width) => resizeDimension("width", width * 72)} /><NumberField label="Height (in)" value={selected.height / 72} min={0.02} max={69} step={0.01} onChange={(height) => resizeDimension("height", height * 72)} /><NumberField label="Rotation (°)" value={selected.rotation} min={-180} max={180} onChange={(rotation) => updateLayer(selected.id, { rotation })} /><NumberField label="Opacity (%)" value={selected.opacity * 100} min={0} max={100} onChange={(opacity) => updateLayer(selected.id, { opacity: opacity / 100 })} /></div>
                 {selected.type === "rect" && <NumberField label="Corner radius (pt)" value={selected.radius} min={0} max={500} onChange={(radius) => updateLayer(selected.id, { radius })} />}
                 <p className="cover-hint">{selected.type === "text" ? "Center this text on:" : "Fill this area:"}</p>
@@ -476,8 +568,9 @@ export function CoverStudio() {
             </> : <p className="cover-hint">Select an object on the canvas or in the layers list to edit it.</p>}
             <PanelTitle>Layers · {project.layers.length}</PanelTitle>
             <p className="cover-hint">Top layer appears in front. Select locked or hidden objects here.</p>
-            <div className="cover-layers">{[...project.layers].reverse().map((layer, index) => <div key={layer.id} className={`cover-layer ${selectedId === layer.id ? "is-selected" : ""}`}>
-              <button className="cover-layer-name" onClick={() => setSelectedId(layer.id)} aria-pressed={selectedId === layer.id}>{layer.type === "text" ? "T" : layer.type === "image" ? "▧" : "◈"} <span>{layer.name}</span></button>
+            <div className="cover-layers">{[...project.layers].reverse().map((layer, index) => <div key={layer.id} className={`cover-layer ${selectedIds.includes(layer.id) ? "is-selected" : ""}`}>
+              <button className="cover-layer-name" onClick={(e) => chooseLayer(layer, e.shiftKey)} aria-pressed={selectedIds.includes(layer.id)}>{layer.type === "text" ? "T" : layer.type === "image" ? "▧" : "◈"} <span>{layer.name}</span></button>
+              <label className="cover-inline"><input aria-label={`Select ${layer.name}`} type="checkbox" checked={selectedIds.includes(layer.id)} onChange={() => chooseLayer(layer, true)} />{layer.groupId ? "Grouped layer" : "Select layer"}</label>
               <div><button aria-label={`${layer.hidden ? "Show" : "Hide"} ${layer.name}`} onClick={() => updateLayer(layer.id, { hidden: !layer.hidden })}>{layer.hidden ? "Show" : "Hide"}</button><button aria-label={`${layer.locked ? "Unlock" : "Lock"} ${layer.name}`} onClick={() => updateLayer(layer.id, { locked: !layer.locked })}>{layer.locked ? "Unlock" : "Lock"}</button><button aria-label={`Raise ${layer.name}`} disabled={index === 0} onClick={() => moveLayer(project.layers.length - 1 - index, 1)}>Raise</button><button aria-label={`Lower ${layer.name}`} disabled={index === project.layers.length - 1} onClick={() => moveLayer(project.layers.length - 1 - index, -1)}>Lower</button></div>
             </div>)}</div>
           </aside>

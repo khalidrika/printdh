@@ -119,3 +119,44 @@ test("Fit reserves room for edge handles and zoomed covers remain fully scrollab
     close(zoom.left, 72); close(zoom.top, 72);
   }
 });
+
+const { snapMove, snapResize } = loadTs(path.resolve(__dirname, "../src/lib/cover/interaction.ts"));
+const { cropImageDrag, selectionBounds, selectionForLayer, coverSnapTargets } = loadTs(path.resolve(__dirname, "../src/lib/cover/editor.ts"));
+test("snap selects nearest guide within screen tolerance and keeps the opposite resize edge fixed", () => {
+  const targets = { x: [0, 100, 200], y: [0, 90] };
+  const snapped = snapMove({ x: 98, y: 88, width: 50, height: 30 }, targets, 3);
+  close(snapped.dx, 2); close(snapped.dy, 2); close(snapped.guides.x, 100);
+  close(snapMove({ x: 95, y: 80, width: 50, height: 30 }, targets, 3).dx, 0);
+  const resized = snapResize({ x: 98, y: 10, width: 50, height: 30 }, "w", targets, 3);
+  close(resized.bounds.x, 100); close(resized.bounds.width, 48); close(resized.bounds.x + resized.bounds.width, 148);
+  const tooSmall = snapResize({ x: 0, y: 0, width: 9, height: 30 }, "e", { x: [5], y: [] }, 6);
+  close(tooSmall.bounds.width, 9);
+});
+test("crop dragging respects rotation, clamps image coverage and retains its frame", () => {
+  const layer = { ...text, type: "image", width: 200, height: 100, pixelWidth: 400, pixelHeight: 400, fit: "cover", cropZoom: 2 };
+  const cropped = cropImageDrag(layer, 25, 30);
+  close(cropped.cropX, 0.25); close(cropped.cropY, 0.2);
+  const rotated = cropImageDrag({ ...layer, rotation: 90 }, -30, 25);
+  close(rotated.cropX, cropped.cropX); close(rotated.cropY, cropped.cropY);
+  close(cropImageDrag(layer, 10000, -10000).cropX, 1); close(cropImageDrag(layer, 10000, -10000).cropY, -1);
+  close(cropImageDrag({ ...layer, cropZoom: 1 }, 20, 0).cropX, 0);
+});
+test("group selection includes hidden members and snapping excludes the moving group", () => {
+  const a = { ...text, id: "a", groupId: "one", width: 40, height: 20 };
+  const b = { ...a, id: "b", x: 200, y: 150, hidden: true };
+  const c = { ...a, id: "c", groupId: "two", x: 300 };
+  const p = { ...model.createCover(), layers: [a,b,c] };
+  assert.deepEqual(selectionForLayer(p, a), ["a", "b"]);
+  assert.deepEqual(selectionBounds([a,b]), { x: 100, y: 100, width: 140, height: 70 });
+  const targets = coverSnapTargets(p, ["a", "b"]);
+  assert.ok(!targets.x.includes(100)); assert.ok(targets.x.includes(300));
+});
+test("legacy projects still load and new reference/crop/group data survives validation", () => {
+  const dataUrl = "data:image/png;base64,AAAA";
+  const legacy = model.createCover(); assert.ok(model.coverProjectSchema.safeParse(legacy).success);
+  const project = { ...legacy, reference: { name: "template", dataUrl, x: 0, y: 0, width: 900, height: 650, opacity: 0.4, hidden: false, locked: true }, layers: [{ ...text, type: "image", dataUrl, pixelWidth: 400, pixelHeight: 400, fit: "cover", cropZoom: 2, cropX: 0.25, cropY: -0.8, groupId: "group" }] };
+  const loaded = model.coverProjectSchema.parse(JSON.parse(JSON.stringify(project)));
+  assert.equal(loaded.reference.locked, true); close(loaded.layers[0].cropX, 0.25); assert.equal(loaded.layers[0].groupId, "group");
+  assert.equal(model.coverProjectSchema.safeParse({ ...project, reference: { ...project.reference, dataUrl: "https://example.com/template.png" } }).success, false);
+  assert.equal(model.coverProjectSchema.safeParse({ ...project, layers: [{ ...project.layers[0], cropZoom: 20 }] }).success, false);
+});

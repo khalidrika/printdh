@@ -57,10 +57,13 @@ export async function renderCover(project: CoverProject, scale: number, cache: I
       const image = await loadCoverImage(layer.dataUrl, cache);
       const sx = layer.width / image.naturalWidth, sy = layer.height / image.naturalHeight;
       const fit = layer.fit === "cover" ? Math.max(sx, sy) : Math.min(sx, sy);
-      const width = layer.fit === "stretch" ? layer.width : image.naturalWidth * fit;
-      const height = layer.fit === "stretch" ? layer.height : image.naturalHeight * fit;
+      const zoom = layer.fit === "cover" ? layer.cropZoom ?? 1 : 1;
+      const width = layer.fit === "stretch" ? layer.width : image.naturalWidth * fit * zoom;
+      const height = layer.fit === "stretch" ? layer.height : image.naturalHeight * fit * zoom;
       context.beginPath(); context.rect(0, 0, layer.width, layer.height); context.clip();
-      context.drawImage(image, (layer.width - width) / 2, (layer.height - height) / 2, width, height);
+      const offsetX = layer.fit === "cover" ? (layer.cropX ?? 0) * Math.max(0, width - layer.width) / 2 : 0;
+      const offsetY = layer.fit === "cover" ? (layer.cropY ?? 0) * Math.max(0, height - layer.height) / 2 : 0;
+      context.drawImage(image, (layer.width - width) / 2 + offsetX, (layer.height - height) / 2 + offsetY, width, height);
     } else if (layer.type === "text") {
       context.font = `${layer.italic ? "italic" : "normal"} ${layer.bold ? "bold" : "normal"} ${layer.fontSize}px "${layer.font}"`;
       context.fillStyle = layer.color;

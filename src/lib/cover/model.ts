@@ -10,19 +10,23 @@ export const COVER_FONTS = ["Arial", "Georgia", "Verdana", "Times New Roman", "C
 const color = z.string().regex(/^#[0-9a-f]{6}$/i);
 const position = z.number().finite().min(-5000).max(5000);
 const size = z.number().finite().min(1).max(5000);
+const imageData = z.string().max(45_000_000).regex(/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/);
 const layerBase = z.object({
   id: z.string().min(1).max(100), name: z.string().max(150),
   x: position, y: position, width: size, height: size,
   rotation: z.number().finite().min(-360).max(360), opacity: z.number().min(0).max(1),
   locked: z.boolean(), hidden: z.boolean(),
+  groupId: z.string().min(1).max(100).optional(),
+  spineRole: z.enum(["background", "text"]).optional(),
 });
 export const coverLayerSchema = z.discriminatedUnion("type", [
   layerBase.extend({ type: z.literal("text"), text: z.string().max(10000),
     font: z.enum(COVER_FONTS), fontSize: z.number().min(7).max(250), bold: z.boolean(), italic: z.boolean(),
     color, align: z.enum(["left", "center", "right"]), direction: z.enum(["ltr", "rtl"]), lineHeight: z.number().min(0.8).max(3),
   }),
-  layerBase.extend({ type: z.literal("image"), dataUrl: z.string().max(45_000_000).regex(/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/),
+  layerBase.extend({ type: z.literal("image"), dataUrl: imageData,
     pixelWidth: z.number().positive().max(30000), pixelHeight: z.number().positive().max(30000), fit: z.enum(["contain", "cover", "stretch"]),
+    cropZoom: z.number().min(1).max(8).optional(), cropX: z.number().min(-1).max(1).optional(), cropY: z.number().min(-1).max(1).optional(),
   }),
   layerBase.extend({ type: z.literal("rect"), color, radius: z.number().min(0).max(500) }),
   layerBase.extend({ type: z.literal("ellipse"), color }),
@@ -33,6 +37,8 @@ export const coverProjectSchema = z.object({
   pageCount: z.number().int().min(24).max(828), paper: z.enum(["white", "cream", "standard", "premium"]),
   customSpine: z.number().min(0.01).max(3).nullable(), readingDirection: z.enum(["ltr", "rtl"]),
   layers: z.array(coverLayerSchema).max(200),
+  reference: z.object({ name: z.string().max(150), dataUrl: imageData, x: position, y: position, width: size, height: size,
+    opacity: z.number().min(0).max(1), hidden: z.boolean(), locked: z.boolean() }).optional(),
 }).refine((p) => new Set(p.layers.map((l) => l.id)).size === p.layers.length, "Layer IDs must be unique.");
 export type CoverProject = z.infer<typeof coverProjectSchema>;
 export type CoverLayer = z.infer<typeof coverLayerSchema>;
@@ -76,7 +82,7 @@ export function coverWarnings(project: CoverProject) {
     if (b.x + b.width <= 0 || b.y + b.height <= 0 || b.x >= g.width || b.y >= g.height) warnings.push(`${layer.name}: outside the cover.`);
     if (layer.type === "image") {
       const sx = layer.width / layer.pixelWidth, sy = layer.height / layer.pixelHeight;
-      const scale = layer.fit === "contain" ? Math.min(sx, sy) : Math.max(sx, sy);
+      const scale = (layer.fit === "contain" ? Math.min(sx, sy) : Math.max(sx, sy)) * (layer.fit === "cover" ? layer.cropZoom ?? 1 : 1);
       const dpi = Math.round(72 / scale);
       if (dpi < 300) warnings.push(`${layer.name}: about ${dpi} DPI at this size.`);
     }

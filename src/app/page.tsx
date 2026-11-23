@@ -34,6 +34,12 @@ export default async function HomePage() {
             <HomeButton />
             <div className="flex flex-wrap justify-end gap-2">
               <Link
+                href="/cover-studio"
+                className="rounded-md border border-emerald-700 bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800"
+              >
+                Cover Studio
+              </Link>
+              <Link
                 href="/metadata"
                 className="rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 shadow-sm transition hover:border-zinc-400 hover:text-zinc-900"
               >
